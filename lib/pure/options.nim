@@ -204,24 +204,24 @@ proc none*[T]: Option[T] =
   ## Alias for ``none(T)``.
   none(T)
 
-proc isSome*[T](self: Option[T]): bool {.inline.} =
+proc isSome*[T](self: Option[T]): bool =
   when T is SomePointer:
     self.val != nil
   else:
     self.has
 
-proc isNone*[T](self: Option[T]): bool {.inline.} =
+proc isNone*[T](self: Option[T]): bool =
   when T is SomePointer:
     self.val == nil
   else:
     not self.has
 
-proc unsafeGet*[T](self: Option[T]): T =
+proc unsafeGet*[T](self: Option[T]): T {.deprecated: "Use `match`, `.?`, or special form `or` and `and` instead of manual checks".} =
   ## Returns the value of a ``some``. Behavior is undefined for ``none``.
   assert self.isSome
   self.val
 
-proc get*[T](self: Option[T]): T =
+proc get*[T](self: Option[T]): T {.deprecated: "Use `match`, `.?`, or special form `or` and `and` instead of manual checks".}=
   ## Returns contents of the Option. If it is none, then an exception is
   ## thrown.
   if self.isNone:
@@ -275,11 +275,6 @@ proc filter*[T](self: Option[T], callback: proc (input: T): bool): Option[T] =
   else:
     self
 
-proc `==`*(a, b: Option): bool =
-  ## Returns ``true`` if both ``Option``s are ``none``,
-  ## or if they have equal values
-  (a.isSome and b.isSome and a.val == b.val) or (not a.isSome and not b.isSome)
-
 proc `$`*[T](self: Option[T]): string =
   ## Get the string representation of this option. If the option has a value,
   ## the result will be `Some(x)` where `x` is the string representation of the contained value.
@@ -290,97 +285,139 @@ proc `$`*[T](self: Option[T]): string =
   else:
     "None[" & name(T) & "]"
 
-macro optionCase*[T](m: Option[T], body: untyped): untyped =
-  ## A macro which provides a safe access pattern to
-  ## the Option type. In branches where the Option is not ``some`` then the
-  ## value is not available.
-  ##
-  ## ``optionCase`` makes the following conversion
-  ##
-  ## optionCase returnsOption():
-  ##    some x:
-  ##      <expr1 using x>
-  ##    none:
-  ##      <expr2 that does not use x>
-  ##
-  ## converts to --->
-  ## let m = returnsOption()
-  ## if m.isSome:
-  ##   let x = m.unsafeGet()
-  ##   <expr1 using x>
-  ## else:
-  ##   <expr2>
-  ##
-  assert body.len == 2
-  let
-    justHead = body[0][0]
-    nothingHead = body[1][0]
-
-  assert $justHead == "some",
-    "First block must be `some`: keyword not found"
-  assert $nothingHead == "none",
-    "Second block must be `none`: keyword not found"
-
-  let
-    mVal = genSym(nskLet)
-    validExpr = newDotExpr(mVal, ident("isSome"))
-    valueExpr = newDotExpr(mVal, ident("unsafeGet"))
-    justClause = nnkStmtList.newTree(
-      nnkLetSection.newTree(
-        nnkIdentDefs.newTree(
-          body[0][1],
-          newEmptyNode(),
-          valueExpr
-        )
-      ),
-      body[0][2]
-    )
-    nothingClause = body[1][1]
-
-  var ifExpr = newNimNode(nnkIfExpr)
-  ifExpr.add(newNimNode(nnkElifExpr).add(validExpr, justClause))
-  ifExpr.add(newNimNode(nnkElseExpr).add(nothingClause))
-
-  result = nnkStmtList.newTree(
-    nnkLetSection.newTree(
-      nnkIdentDefs.newTree(
-        mVal,
-        newEmptyNode(),
-        m
-      )
-    ),
-    ifExpr
-  )
-
-proc `>>=`*[T,U](self: Option[U], p: proc(value: U): Option[T]): Option[T] =
-  ## Used for chaining monadic computations together. Will create a none if
-  ## ``self`` is none, or if ``p`` returns a none. Otherwise it will return the
-  ## some created by ``p``.
-  if self.has:
-      result = p(self.val)
+macro `.?`*(option: untyped, statements: untyped): untyped =
+  let opt = genSym(nskLet)
+  var
+    injected = statements
+    firstBarren = statements
+  if firstBarren.len != 0:
+    while true:
+      if firstBarren[0].len == 0:
+        firstBarren[0] = nnkDotExpr.newTree(nnkDotExpr.newTree(opt, newIdentNode("val")), firstBarren[0])
+        break
+      firstBarren = firstBarren[0]
   else:
-      result = none(T)
+    injected = nnkDotExpr.newTree(nnkDotExpr.newTree(opt, newIdentNode("val")), firstBarren)
 
-proc optCmp*[T](self: Option[T], value: T, cmp: proc (val1, val2: T): bool):
+  result = quote do:
+    (proc (): auto =
+      let `opt` = `option`
+      if `opt`.isSome:
+        when compiles(`injected`) and not compiles(some(`injected`)):
+          `injected`
+        else:
+          return some(`injected`)
+    )()
+
+  #echo result.treerepr
+
+macro match*(option: untyped, body: untyped): untyped =
+  var
+    noneCase: NimNode = nil
+    elseCase: tuple[ident, body: NimNode] = (ident: nil, body: nil)
+    cases: seq[tuple[ident, check, body: NimNode]] = @[]
+  for optionCase in body:
+    case optionCase.kind:
+    of nnkCall:
+      if $optionCase[0] != "none":
+        if $optionCase[0] != "some":
+          error "Only \"none\" and \"some\" are allowed as case labels", optionCase[0]
+        else:
+          error "Only \"none\" is allowed to not have arguments", optionCase[0]
+      elif noneCase != nil:
+        error "Only one \"none\" case is allowed, previously defined \"none\" case at: " & lineInfo(noneCase), optionCase[0]
+      else:
+        noneCase = optionCase[1]
+    of nnkCommand:
+      if $optionCase[0] != "some":
+        if $optionCase[0] != "none":
+          error "Only \"none\" and \"some\" are allowed as case labels", optionCase[0]
+        else:
+          error "Only \"some\" is allowed to have arguments", optionCase[0]
+      else:
+        if optionCase[1].kind != nnkInfix:
+          if elseCase.body != nil:
+            error "Only one \"some\" case without a check is allowed, previously defined \"some\" case at: " & lineInfo(elseCase.body), optionCase[0]
+          else:
+            if $optionCase[1] != "_":
+              elseCase = (ident: optionCase[1], body: optionCase[2])
+            else:
+              elseCase = (ident: nil, body: optionCase[2])
+        else:
+          if $optionCase[1][0] != "of":
+            error "Invalid separator, only \"of\" allowed", optionCase[1][0]
+          else:
+            if $optionCase[1][1] != "_":
+              cases.add (ident: optionCase[1][1], check: optionCase[1][2], body: optionCase[2])
+            else:
+              cases.add (ident: nil, check: optionCase[1][2], body: optionCase[2])
+    else:
+      error "Unrecognized structure of cases", optionCase
+  if noneCase == nil:
+    error "Must have a \"none\" case"
+  if elseCase.body == nil and cases.len == 0:
+    error "Must have a \"some\" case"
+  var
+    optionSym = genSym(nskLet)
+    value = nnkDotExpr.newTree(optionSym, newIdentNode("val"))
+  var caseStmt = nnkCaseStmt.newTree(
+    value
+  )
+  for c in cases:
+    var ofBranch = nnkOfBranch.newTree(
+      c.check,
+      newStmtList()
+    )
+    if c.ident != nil:
+      ofBranch[1].add newLetStmt(c.ident, value)
+    ofBranch[1].add c.body
+    caseStmt.add ofBranch
+  if elseCase.body != nil:
+    if elseCase.ident != nil:
+      caseStmt.add nnkElse.newTree(newStmtList(
+        newLetStmt(elseCase.ident, value),
+        elseCase.body
+      ))
+    else:
+      caseStmt.add nnkElse.newTree(elseCase.body)
+  result = quote do:
+    (proc (): auto =
+      let `optionSym` = `option`
+      if `optionSym`.isSome:
+        `caseStmt`
+      else:
+        `noneCase`
+    )()
+  #echo result.repr
+
+proc optCmp*[T](self: Option[T], value: Option[T], cmp: proc (val1, val2: T): bool):
   Option[T] =
   ## Comparison operation that return a some iff ``self`` is a some and the value
   ## of ``cmp`` applied to ``self`` and ``value`` returns true. The returned
   ## some has the value of ``self``
-  if self.has:
-    if cmp(self.val, value):
-      self
-    else:
-      none(T)
-  else:
-    none(T)
+  if self.isSome and value.isSome and cmp(self.val, value.val):
+    return self
 
-template optCmp*[T](value: T, self: Option[T], cmp: proc (val1, val2: T): bool):
-  Option[T] =
-  optCmp(self, value, cmp)
+template `==`*[T](self: Option[T], value: Option[T]): Option[T] =
+  optCmp(self, value, proc (val1, val2: T): bool = val1 == val2)
 
-template optCmp*[T](self: T, value: T, cmp: proc (val1, val2: T): bool):
-  Option[T] =
-  optCmp(some(self), value, cmp)
+template `!=`*[T](self: Option[T], value: Option[T]): Option[T] =
+  optCmp(self, value, proc (val1, val2: T): bool = val1 != val2)
+
+template `not`*[T](self: Option[T]): bool =
+  self.isSome
+
+template `<=`*[T](self: Option[T], value: Option[T]): Option[T] =
+  optCmp(self, value, proc (val1, val2: T): bool = val1 <= val2)
+
+template `>=`*[T](self: Option[T], value: Option[T]): Option[T] =
+  optCmp(self, value, proc (val1, val2: T): bool = val1 >= val2)
+
+template `>`*[T](self: Option[T], value: Option[T]): Option[T] =
+  optCmp(self, value, proc (val1, val2: T): bool = val1 > val2)
+
+template `<`*[T](self: Option[T], value: Option[T]): Option[T] =
+  optCmp(self, value, proc (val1, val2: T): bool = val1 < val2)
 
 proc toOpt*[T](value: Option[T]): Option[T] =
   ## Procedure with overload to automatically convert something to an option if
@@ -398,15 +435,17 @@ macro optOr*(options: varargs[untyped]): untyped =
   ## a procedure that returns an Option they won't get evaluated if an earlier
   ## option is a some. If any of the options is not an option but another type
   ## they will be converted to an option of that type automatically.
-  var procName = genSym(nskProc)
-  result = nnkProcDef.newTree(procName, newEmptyNode(), newEmptyNode(),
-    nnkFormalParams.newTree(newIdentNode("auto")),
-    newEmptyNode(), newEmptyNode(), newStmtList())
+  var body = newStmtList()
   for option in options:
-    result[6].add quote do:
+    body.add quote do:
       let opt = toOpt(`option`)
-      if opt.has: return opt
-  result = nnkStmtList.newTree(result, nnkCall.newTree(procName))
+      if opt.isSome: return opt
+
+  result = quote do:
+    (proc (): auto = `body`)()
+
+template `or`*(opt1, opt2: Option): untyped =
+  optOr(opt1, opt2)
 
 macro optAnd*(options: varargs[untyped]): untyped =
   ## Goes through all options until one of them is not a some. If one of the
@@ -415,19 +454,25 @@ macro optAnd*(options: varargs[untyped]): untyped =
   ## Option they won't get evaluated if an earlier option is a none. If any of
   ## the options is not an option but another type they will be converted to an
   ## option of that type automatically.
-  var procName = genSym(nskProc)
-  result = nnkProcDef.newTree(procName, newEmptyNode(), newEmptyNode(),
-    nnkFormalParams.newTree(newIdentNode("auto")),
-    newEmptyNode(), newEmptyNode(), newStmtList())
-  var lastOpt: NimNode
+  var
+    body = newStmtList()
+    lastOpt: NimNode
   for option in options:
     lastOpt = genSym(nskLet)
-    result[6].add quote do:
+    body.add quote do:
       let `lastOpt` = toOpt(`option`)
-      if not `lastOpt`.has: return
-  result[6].add quote do:
+      if not `lastOpt`.isSome: return
+  body.add quote do:
     return `lastOpt`
-  result = nnkStmtList.newTree(result, nnkCall.newTree(procName))
+
+  result = quote do:
+    (proc (): auto = `body`)()
+
+template `and`*(opt1, opt2: Option): untyped =
+  optAnd(opt1, opt2)
+
+converter toSome*[T](value: T): Option[T] = some(value)
+converter toBool*[T](opt: Option[T]): bool = opt.isSome
 
 when isMainModule:
   import unittest, sequtils
@@ -447,7 +492,6 @@ when isMainModule:
 
       let result = "team".find('i')
 
-      check result == intNone
       check result.isNone
 
     test "some":
@@ -465,8 +509,10 @@ when isMainModule:
     test "equality":
       check some("a") == some("a")
       check some(7) != some(6)
-      check some("a") != stringNone
-      check intNone == intNone
+      check (not some("a").isNone)
+      check intNone.isNone
+      check (intNone == intNone) == false
+      check (none(int) == intNone) == false
 
       when compiles(some("a") == some(5)):
         check false
@@ -476,6 +522,7 @@ when isMainModule:
     test "get with a default value":
       check(some("Correct").get("Wrong") == "Correct")
       check(stringNone.get("Correct") == "Correct")
+      check(either(some(100) < some(200), 10) == 100)
 
     test "$":
       check($(some("Correct")) == "Some(Correct)")
@@ -504,7 +551,7 @@ when isMainModule:
           result = none(int)
 
       check(some(1).flatMap(addOneIfNotZero) == some(2))
-      check(some(0).flatMap(addOneIfNotZero) == none(int))
+      check(some(0).flatMap(addOneIfNotZero).isNone)
       check(some(1).flatMap(addOneIfNotZero).flatMap(addOneIfNotZero) == some(3))
 
       proc maybeToString(v: int): Option[string] =
@@ -522,7 +569,7 @@ when isMainModule:
           result = none(string)
 
       check(some(1).flatMap(maybeToString).flatMap(maybeExclaim) == some("1!"))
-      check(some(0).flatMap(maybeToString).flatMap(maybeExclaim) == none(string))
+      check(some(0).flatMap(maybeToString).flatMap(maybeExclaim).isNone)
 
     test "SomePointer":
       var intref: ref int
@@ -535,7 +582,7 @@ when isMainModule:
 
     test "none[T]":
       check(none[int]().isNone)
-      check(none(int) == none[int]())
+      check(none(int).isNone)
 
     test "$ on typed with .name":
       type Named = object
@@ -551,39 +598,63 @@ when isMainModule:
       let noperson = none(Person)
       check($noperson == "None[Person]")
 
-    test "optionCase":
+    test "match":
       let x = some(100)
-      optionCase x:
+      match x:
         some y:
           check y == 100
         none: discard
+
+      var echoed = ""
+      proc mockEcho(input: varargs[string, `$`]) =
+        echoed = input[0]
+        for i in 1..input.high:
+          echoed = echoed & input[i]
+
+      match some(100):
+        some x: mockEcho x
+        some _ of 100: mockEcho "Is hundred"
+        none: mockEcho "No value"
+
+      check echoed == "Is hundred"
+
+      var res = match(none(int)) do:
+        some _: "Hello"
+        none: "No value"
+
+      check res == "No value"
 
     test "compare":
       proc leq(x, y: int): bool =
         x <= y
       check optCmp(10, 20, leq) == some(10)
-      check optCmp(30, 20, leq) == none(int)
+      check optCmp(30, 20, leq).isNone
 
     test "or and and":
-      check optAnd(none(int), some(20)) == none(int)
+      check optAnd(none(int), some(20)).isNone
       check optAnd(some(10), some(20)) == some(20)
       check optOr(none(int), some(20)) == some(20)
       check optOr(some(10), some(20)) == some(10)
+
+      check (none(int) and some(20)).isNone
+      check (some(10) and some(20)) == some(20)
+      check (none(int) or some(20)) == some(20)
+      check (some(10) or some(20)) == some(10)
 
       var evaluated = false
       proc shouldntHappen(): Option[int] =
         evaluated = true
         none(int)
       # Checks that optOr terminates early so shouldntHappen is never run
-      check optOr(some(10), shouldntHappen()) == some(10)
+      check (some(10) or shouldntHappen()) == some(10)
       check(evaluated == false)
       # Checks that optAnd terminates early so shouldntHappen is never run
-      check optAnd(none(int), shouldntHappen()) == none(int)
+      check (none(int) and shouldntHappen()).isNone
       check(evaluated == false)
       # Check composability
       check(
-        optOr(none(int), none(int),
-          optAnd(some(10), some(20)),
+        (none(int) or none(int) or
+          (some(10) and some(20)) or
           shouldntHappen()
         ) == some(20))
       check(evaluated == false)
@@ -591,4 +662,20 @@ when isMainModule:
       check optOr(10, 20, some(30)) == some(10)
       # Check that optAnd can auto-convert literals
       check optAnd(10, 20, some(30)) == some(30)
+
+    test "conditional continuation":
+      when not compiles(some("Hello world").?find('w').echo):
+        check false
+      check (some("Hello world").?find('w') == 6)
+      check (none(string) or some("hello corld") or some("hello world")).?
+        find('w') == -1
+      var evaluated = false
+      if some("team").?find('i') != -1:
+        evaluated = true
+      check evaluated == false
+      if none(string).?find('i') != -1:
+        evaluated = true
+      check evaluated == false
+
+
 
