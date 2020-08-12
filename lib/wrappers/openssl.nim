@@ -474,7 +474,7 @@ proc SSL_accept*(ssl: SslPtr): cint{.cdecl, dynlib: DLLSSLName, importc.}
 proc SSL_pending*(ssl: SslPtr): cint{.cdecl, dynlib: DLLSSLName, importc.}
 
 proc BIO_new_mem_buf*(data: pointer, len: cint): BIO{.cdecl,
-    dynlib: DLLSSLName, importc.}
+    dynlib: DLLUtilName, importc.}
 proc BIO_new_ssl_connect*(ctx: SslCtx): BIO{.cdecl,
     dynlib: DLLSSLName, importc.}
 proc BIO_ctrl*(bio: BIO, cmd: cint, larg: int, arg: cstring): int{.cdecl,
