@@ -1,5 +1,5 @@
 include system/inclrtl
-
+from std/staticos import PathComponent
 import std/[oserrors]
 
 when defined(nimPreviewSlimSystem):
@@ -64,19 +64,6 @@ when defined(windows) and not weirdTarget:
     const dot = ord('.')
     result = f.cFileName[0].int == dot and (f.cFileName[1].int == 0 or
              f.cFileName[1].int == dot and f.cFileName[2].int == 0)
-
-
-type
-  PathComponent* = enum   ## Enumeration specifying a path component.
-    ##
-    ## See also:
-    ## * `walkDirRec iterator`_
-    ## * `FileInfo object`_
-    pcFile,               ## path refers to a file
-    pcLinkToFile,         ## path refers to a symbolic link to a file
-    pcDir,                ## path refers to a directory
-    pcLinkToDir           ## path refers to a symbolic link to a directory
-
 
 when defined(posix) and not weirdTarget:
   proc getSymlinkFileKind*(path: string):

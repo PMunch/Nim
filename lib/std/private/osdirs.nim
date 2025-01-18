@@ -2,12 +2,12 @@
 
 include system/inclrtl
 import std/oserrors
-
+import std/staticos
 
 import ospaths2, osfiles
 import oscommon
-export dirExists, PathComponent
 
+export dirExists, PathComponent
 
 when defined(nimPreviewSlimSystem):
   import std/[syncio, assertions, widestrs]
@@ -151,10 +151,6 @@ iterator walkDirs*(pattern: string): string {.tags: [ReadDirEffect], noWeirdTarg
     let paths = toSeq(walkDirs("lib/pure/*")) # works on Windows too
     assert "lib/pure/concurrency".unixToNativePath in paths
   walkCommon(pattern, isDir)
-
-proc staticWalkDir(dir: string; relative: bool): seq[
-                  tuple[kind: PathComponent, path: string]] =
-  discard
 
 iterator walkDir*(dir: string; relative = false, checkDir = false,
                   skipSpecial = false):
